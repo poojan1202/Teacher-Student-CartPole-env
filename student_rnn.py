@@ -85,23 +85,20 @@ class Agent(nn.Module):
 class StudentAgent(nn.Module):
     def __init__(self, envs):
         super(StudentAgent, self).__init__()
-        inp = 2+1
-        self.layer1 = nn.Linear(np.array(inp).prod(),32)
-        self.layer2 = nn.LSTM(input_size=32,hidden_size=32,batch_first=True)
-        self.layer3 = nn.Linear(32,  envs.action_space.n)
-        #self.hidden = None
+        inp = 2
+        #self.layer1 = nn.Linear(np.array(inp).prod(),32)
+        self.layer1 = nn.LSTM(input_size=inp,hidden_size=32,batch_first=True)
+        self.layer2 = nn.Linear(32,  envs.action_space.n)
+        self.hidden = None
 
-    def forward(self,x):
-        #if self.hidden is None:
-        #    self.hidden = (torch.randn( 1, 32),
-        #          torch.randn( 1, 32))
-        hidden = (torch.randn(1, 32),
-                 torch.randn( 1, 32))
-        out = F.relu(self.layer1(x))
-        out, hidden = self.layer2(out, hidden)
+    def forward(self,x,hidden):
+
+        #out = F.relu(self.layer1(x))
+        out, hidden = self.layer1(x, hidden)
+        out = out.reshape(-1,32)
         #self.hidden = hidden
-        out = F.softmax(self.layer3(out))
-        return out
+        out = F.softmax(self.layer2(out))
+        return out, hidden
 
 
 envs = VecPyTorch(DummyVecEnv([make_env('CartPole-v1', 1+i, i) for i in range(1)]), device)
@@ -112,25 +109,19 @@ model.load_state_dict(torch.load('runs/teacher_model.pth'))
 
 
 student_model = StudentAgent(envs)
-criterion = nn.CrossEntropyLoss()
+criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(student_model.parameters(), lr=0.0001)
 
 #Choosing action from student_model
 def choose_action(given_state,prev_action=None):
     with torch.no_grad():
-        if prev_action is None:
-            action = envs.action_space.sample()
-        else:
-            action = prev_action
+        #if prev_action is None:
+        #    action = envs.action_space.sample()
+        #else:
+        #    action = prev_action
         given_state = torch.Tensor(given_state)
-        #given_state = given_state.resize(2)
-
-        #given_state = given_state.resize(1,2)
-        #print(given_state,torch.tensor([action]))
-        rnn_state = torch.cat((given_state,torch.tensor([action])))
-        rnn_state  =rnn_state.resize(1,3)
-        #print(given_state)
-        act_val = student_model(rnn_state)
+        rnn_state  =given_state.resize(1,1,2)
+        act_val, hidden = student_model(rnn_state,None)
         action = int(torch.argmax(act_val))
         return action
 
@@ -156,49 +147,67 @@ class ReplayMemory(): # Stores [[state],[hidden_state],[prev_action]]
             self.memory[idx].clear()
 
     def sample(self, batch_size):
-        rows = random.sample(range(0, len(self.memory[0])), batch_size)
+        rows = random.sample(range(10, len(self.memory[0])), batch_size)
         experiences = [[],[],[]]
         for row in rows:
+            hold = [[],[],[]]
+            start = row-10
+            for vals in range(start,row):
+                for col in range(3):
+                    hold[col].append(self.memory[col][vals])
+
             for col in range(3):
-                experiences[col].append(self.memory[col][row])
+                if col==0:
+                    for i in (range(10)):
+                        experiences[col].append(self.memory[col][row+i-10])
+                    continue
+                experiences[col].append(hold[col])
         return experiences
 
     def __len__(self):
-        return len(self.memory[0])
+        return len(self.memory[1])
 
 memory = ReplayMemory(50000)
 BATCH_SIZE = 128
 
 
-def optimize_model():
-    if len(memory) < BATCH_SIZE:
-        return 0
+def optimize_model(hidden):
+    if str(type(hidden)) == "<class 'int'>":
+        hidden = None
+    else:
+        hidden = hidden
+    if len(memory) < BATCH_SIZE+10:
+        return 0,0
     experiences = memory.sample(BATCH_SIZE)
     states = torch.tensor(experiences[0])
     hidden_states = torch.tensor(experiences[1])
-    hidden_states = hidden_states.resize(2,128)
     prev_action = torch.tensor(experiences[2])
-    prev_action = prev_action.resize(1,128)
-    #print(hidden_states.shape,prev_action.shape)
-    rnn_state = torch.cat((hidden_states,prev_action))
-    rnn_state = rnn_state.resize(128,3)
-    student_action_batch = student_model(rnn_state)
+    prev_action = prev_action.resize(1,10,128)
+
+    rnn_state = hidden_states
+
+    student_action_batch, hidden = student_model(rnn_state,hidden)
+    hidden1 = hidden[0].detach()
+    hidden2 = hidden[1].detach()
+    hidden = (hidden1,hidden2)
+    #print(hidden)
     student_action_batch = torch.Tensor(student_action_batch)#.unsqueeze(1)
-    student_action_batch = student_action_batch.resize(2,128)
 
     with torch.no_grad():
         teacher_action_batch,x,y = model.get_action(states)
 
-    teacher_act_vec = torch.zeros((2, BATCH_SIZE))
+    #teacher_act_vec = torch.zeros((2, BATCH_SIZE*10))
+    teacher_act_vec = torch.zeros(( BATCH_SIZE * 10, 2))
 
-    for i in range(BATCH_SIZE):
-        teacher_act_vec[teacher_action_batch[i].item()][i] = 1
+    for i in range(BATCH_SIZE*10):
+        #teacher_act_vec[teacher_action_batch[i].item()][i] = 1
+        teacher_act_vec[i][teacher_action_batch[i].item()] = 1
 
     loss = criterion(student_action_batch,teacher_act_vec)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-    return loss
+    return float(loss), hidden
 
 ep = 5000
 loss_list = []
@@ -212,6 +221,7 @@ for i in range(ep):
     reward = 0
     episode_loss = 0
     action = None
+    hidden = None
 
     while not done:
         step+=1
@@ -224,9 +234,9 @@ for i in range(ep):
         memory.store([st,st_h, action])
         st = st_new
         st_h = st_new[::2]
-        loss = float(optimize_model())
-        if loss>100:
-            step_loss.append(loss)
+        loss, hidden = optimize_model(hidden)
+        #loss = float(loss)
+
         episode_loss+=loss
         if len(memory)>50000:
             memory.pop()
@@ -241,7 +251,7 @@ for i in range(ep):
             print('episode_loss: ',episode_loss)
 
 
-PATH = 'runs/student_model_rnn_5000_2.pth'
+PATH = 'runs/student_model_rnn_5000_1604.pth'
 torch.save(student_model.state_dict(), PATH)
 x1 = np.arange(len(loss_list))
 fig1,ax1 = plt.subplots()
