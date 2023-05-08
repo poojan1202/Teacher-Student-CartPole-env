@@ -105,7 +105,7 @@ envs = VecPyTorch(DummyVecEnv([make_env('CartPole-v1', 1+i, i) for i in range(1)
 
 
 #Choosing action from student_model
-def choose_action(given_state,prev_action):
+def choose_action(given_state,prev_action,hidden=None):
     with torch.no_grad():
         #if prev_action is None:
         #    action = envs.action_space.sample()
@@ -115,12 +115,12 @@ def choose_action(given_state,prev_action):
         rnn_state = torch.cat((given_state,torch.tensor([prev_action])))
         #print(given_state.size(),torch.tensor([prev_action]).size())
         rnn_state  =rnn_state.resize(1,1,3)
-        act_val, hidden = student_model(rnn_state,None)
+        act_val, hidden = student_model(rnn_state,hidden)
         action = int(torch.argmax(act_val))
-        return action
+        return action,hidden
 
 student_model = StudentAgent(envs)
-student_model.load_state_dict(torch.load('runs/student_model_rnn_5000_1804.pth'))
+student_model.load_state_dict(torch.load('runs/student_model_rnn_5000_0505.pth'))
 teacher_model = Agent(envs).to(device)
 teacher_model.load_state_dict(torch.load('runs/teacher_model.pth'))
 
@@ -138,11 +138,12 @@ for i in range(ep):
     reward = 0
     episode_loss = 0
     action = envs.action_space.sample()
+    hidden_1 = None
 
     while not done:
         env.render()
         step += 1
-        action_new = choose_action(st_h, action)
+        action_new, hidden_1 = choose_action(st_h, action,hidden_1)
 
         st_new, rew, done, info = env.step(action_new)
         st = st_new
