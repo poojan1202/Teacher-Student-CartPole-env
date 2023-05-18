@@ -85,7 +85,7 @@ class Agent(nn.Module):
 class StudentAgent(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        self.inp = 2 + 1
+        self.inp = 4 + 1
         self.hidden_space = 32
         # self.layer1 = nn.Linear(np.array(inp).prod(),32)
         self.layer1 = nn.Linear(self.inp, self.hidden_space)
@@ -94,22 +94,25 @@ class StudentAgent(nn.Module):
 
     def forward(self, x, h, c):
         out = F.relu(self.layer1(x))
-        out, (h_out, c_out) = self.layer2(out, (h, c))
+        out, (new_h, new_c) = self.layer2(out, (h, c))
         out = out.reshape(-1, 32)
         out = F.softmax(self.layer3(out))
-        return out, h_out, c_out
+        return out, new_h, new_c
 
     def sample_action(self, state, prev_action, h, c):
-        state = torch.Tensor(state)
-        # Concatenating partial_state and prev action to feed the rnn
-        rnn_state = torch.cat((state, torch.tensor([prev_action])))
-        rnn_state = rnn_state.resize(1, 1, 3)
+        given_state = torch.Tensor(state)
+        # print(given_state,prev_action)
+        rnn_state = torch.cat((given_state, torch.tensor([prev_action])))
+        # print(given_state.size(),torch.tensor([prev_action]).size())
+        rnn_state = rnn_state.resize(1, 1, 5)
         act_val, h_new, c_new = self.forward(rnn_state, h, c)
         probs = Categorical(probs=act_val)
         action = probs.sample().item()
+        # action = int(torch.argmax(act_val))
         return action, h_new, c_new
 
     def init_hidden_state(self, batch_size, training=None):
+
         if training is True:
             return torch.zeros([1, batch_size, self.hidden_space]), torch.zeros([1, batch_size, self.hidden_space])
         else:
@@ -125,6 +128,7 @@ class ReplayMemory:  # Stores [[state],[hidden_state],[prev_action],[h],[c]]
     def store(self, data):
         """Saves a transition."""
         for idx, part in enumerate(data):
+            # print("Col {} appended {}".format(idx, point))
             self.memory[idx].append(part)
 
     def pop(self):
@@ -133,7 +137,6 @@ class ReplayMemory:  # Stores [[state],[hidden_state],[prev_action],[h],[c]]
             self.memory[idx].pop(0)
 
     def remove(self):
-        """Deletes all the transitions stored in the buffer"""
         for idx in range(5):
             self.memory[idx].clear()
 
@@ -167,6 +170,7 @@ class ReplayMemory:  # Stores [[state],[hidden_state],[prev_action],[h],[c]]
 
 
 def optimize_model(memory, BATCH_SIZE, student_model, teacher_model, criterion, optimizer):
+    # h_net, c_net = student_model.init_hidden_state(batch_size=BATCH_SIZE,training=True)
 
     if len(memory) < BATCH_SIZE + 10:
         return 0
@@ -175,12 +179,12 @@ def optimize_model(memory, BATCH_SIZE, student_model, teacher_model, criterion, 
     # Fully Observable states for Teacher Network
     states = torch.tensor(experiences[0])
     # Partial Observable states for Student Network
-    partial_states = torch.tensor(experiences[1])
+    hidden_states = torch.tensor(experiences[1])
     # Batch of previous actions from the samples
     prev_action = torch.tensor([experiences[2]])
     prev_action = prev_action.resize(128, 10, 1)
     # Concatenating actions and partial states to feed the student network
-    rnn_state = torch.cat((partial_states, prev_action), 2)
+    rnn_state = torch.cat((hidden_states, prev_action), 2)
 
     # hidden_memory for the batch of sequence
     h_net = torch.stack(experiences[3])
@@ -188,18 +192,20 @@ def optimize_model(memory, BATCH_SIZE, student_model, teacher_model, criterion, 
     # hidden_memory for the batch of sequence
     c_net = torch.stack(experiences[4])
     c_net = c_net.resize(1, 128, 32)
+    # print(h_net)
+    # return torch.zeros([1, batch_size, self.hidden_space]), torch.zeros([1, batch_size, self.hidden_space])
 
     student_action_batch, _, _ = student_model(rnn_state, h_net, c_net)
-    student_action_batch = torch.Tensor(student_action_batch)
+    student_action_batch = torch.Tensor(student_action_batch)  # .unsqueeze(1)
 
     with torch.no_grad():
         teacher_action_batch, x, y = teacher_model.get_action(states)
 
-    # getting actions from teacher network by giving fully obs states
-    teacher_act_vec = torch.zeros((BATCH_SIZE * 10, 2))
+    # teacher_act_vec = torch.zeros((2, BATCH_SIZE*10))
+    teacher_act_vec = torch.zeros((BATCH_SIZE * 10, 3))
 
     for i in range(BATCH_SIZE * 10):
-        # actions in one-hot vector arrays
+        # teacher_act_vec[teacher_action_batch[i].item()][i] = 1
         teacher_act_vec[i][teacher_action_batch[i].item()] = 1
 
     loss = criterion(student_action_batch, teacher_act_vec)
@@ -212,24 +218,24 @@ def optimize_model(memory, BATCH_SIZE, student_model, teacher_model, criterion, 
 if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = gym.make("CartPole-v1")
+    env = gym.make("Acrobot-v1")
 
-    envs_vector = VecPyTorch(DummyVecEnv([make_env("CartPole-v1", 1 + i, i) for i in range(1)]), device)
+    envs = VecPyTorch(DummyVecEnv([make_env("Acrobot-v1", 1 + i, i) for i in range(1)]), device)
 
-    teacher_model = Agent(envs_vector).to(device)
-    teacher_model.load_state_dict(torch.load("runs/teacher_model.pth"))
+    teacher_model = Agent(envs).to(device)
+    teacher_model.load_state_dict(torch.load("runs/acrobot_teacher_model.pth"))
 
-    student_model = StudentAgent(envs_vector)
+    student_model = StudentAgent(envs)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(student_model.parameters(), lr=0.0001)
 
     memory = ReplayMemory(50000)
     BATCH_SIZE = 128
 
-    # Initialize buffer with 50 eps of teacher network
+    # Initialize buffer with teacher 50 ep
     b_ep = 50
 
-    # Training loop vars
+    # Training loop
     ep = 1000
     loss_list = []
     step_loss = []
@@ -237,23 +243,25 @@ if __name__ == "__main__":
 
     for i in range(b_ep):
         st = env.reset()
-        partial_st = st[::2]
+        st_h = st[:4]
         done = False
         reward = 0
         episode_loss = 0
-        action = envs_vector.action_space.sample()
+        action = envs.action_space.sample()
+        # hidden = None
+        # hidden_1 = None
         step = 0
         h, c = student_model.init_hidden_state(batch_size=BATCH_SIZE, training=False)
 
         while not done:
             step += 1
-            action_new, h_n, c_n = student_model.sample_action(partial_st, action, h, c)
+            action_new, h_n, c_n = student_model.sample_action(st_h, action, h, c)
             teacher_action = teacher_model.get_action(torch.tensor(st))
             st_new, rew, done, info = env.step(teacher_action[0].item())
 
-            memory.store([st, partial_st, action, h_n.detach(), c_n.detach()])
+            memory.store([st, st_h, action, h_n.detach(), c_n.detach()])
             st = st_new
-            partial_st = st_new[::2]
+            st_h = st_new[:4]
             action = action_new
             h = h_n
             c = c_n
@@ -261,35 +269,35 @@ if __name__ == "__main__":
             if done:
                 print("ep: ", i)
                 print("steps: ", step)
+            #    print('episode_loss: ',episode_loss)
 
-    # Training Loop
     for i in range(ep):
         step = 0
         st = env.reset()
-        partial_st = st[::2]
+        st_h = st[:4]
         done = False
         reward = 0
         episode_loss = 0
-        action = envs_vector.action_space.sample()
+        action = envs.action_space.sample()
+        # hidden = None
         h, c = student_model.init_hidden_state(batch_size=BATCH_SIZE, training=False)
-
-        # Saving Network after every 50 epds
         if (i + 1) % 50 == 0:
-            PATH = f"runs/1605_3/student_model_rnn_5000_1605_3_{i + 1}.pth"
+            PATH = f"runs/acrobot/student_model_rnn_acrobot_{i + 1}.pth"
+            # print(PATH)
             torch.save(student_model.state_dict(), PATH)
-        # Emptying Memory (Replay Buffer) after every 200eps
+
         if i > 200 and (i + 1) % 200 == 0:
             memory.remove()
-        # Training Network every step instead of at the end of every episode
+
         while not done:
             step += 1
-            action_new, h, c = student_model.sample_action(partial_st, action, h, c)
+            action_new, h, c = student_model.sample_action(st_h, action, h, c)
 
             st_new, rew, done, info = env.step(action_new)
 
-            memory.store([st, partial_st, action, h.detach(), c.detach()])
+            memory.store([st, st_h, action, h.detach(), c.detach()])
             st = st_new
-            partial_st = st_new[::2]
+            st_h = st_new[:4]
             action = action_new
             loss = optimize_model(
                 memory=memory,
@@ -305,7 +313,9 @@ if __name__ == "__main__":
             episode_loss += loss
             if len(memory) > 50000:
                 memory.pop()
+            # env.render()
             reward += rew
+            # print(reward)
             if done:
                 loss_list.append(episode_loss)
                 reward_list.append(reward)
@@ -313,8 +323,7 @@ if __name__ == "__main__":
                 print("steps: ", step)
                 print("episode_loss: ", episode_loss)
 
-    # Saving model and displaying training plots
-    PATH = "runs/student_model_rnn_5000_1605_3.pth"
+    PATH = "runs/student_model_rnn_acrobot.pth"
     torch.save(student_model.state_dict(), PATH)
     x1 = np.arange(len(loss_list))
     fig1, ax1 = plt.subplots()

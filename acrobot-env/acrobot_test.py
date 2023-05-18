@@ -5,13 +5,12 @@ import torch.nn as nn
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnvWrapper
 from torch.distributions.categorical import Categorical
 import torch.nn.functional as F
-
+import time
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-env = gym.make("CartPole-v1")
+env = gym.make("Acrobot-v1")
 
-# vectorised env for teacher network
-# Same as teacher_cleanRL.py
+
 class VecPyTorch(VecEnvWrapper):
     def __init__(self, venv, device):
         super().__init__(venv)
@@ -46,6 +45,20 @@ def make_env(gym_id, seed, idx):
         return env
 
     return thunk
+
+
+class StudentAgent(nn.Module):
+    def __init__(self, envs):
+        super().__init__()
+        self.layer1 = nn.Linear(np.array(envs.observation_space.shape).prod(), 64)
+        self.layer2 = nn.Linear(64, 32)
+        self.layer3 = nn.Linear(32, envs.action_space.n)
+
+    def forward(self, x):
+        out = F.relu(self.layer1(x))
+        out = F.relu(self.layer2(out))
+        out = F.softmax(self.layer3(out))
+        return out
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -83,53 +96,25 @@ class Agent(nn.Module):
         return self.critic(x)
 
 
-# Student Architecture
-class StudentAgent(nn.Module):
-    def __init__(self, envs):
-        super().__init__()
-        self.inp = 3
-        self.hidden_space = 32
-        # self.layer1 = nn.Linear(np.array(inp).prod(),32)
-        self.layer1 = nn.Linear(self.inp, self.hidden_space)
-        self.layer2 = nn.LSTM(input_size=self.hidden_space, hidden_size=self.hidden_space, batch_first=True)
-        self.layer3 = nn.Linear(self.hidden_space, envs.action_space.n)
+envs = VecPyTorch(DummyVecEnv([make_env("Acrobot-v1", 1 + i, i) for i in range(1)]), device)
 
-    def forward(self, x, h, c):
-        out = F.relu(self.layer1(x))
-        out, (new_h, new_c) = self.layer2(out, (h, c))
-        out = out.reshape(-1, 32)
-        out = F.softmax(self.layer3(out))
-        return out, new_h, new_c
-
-    def sample_action(self, state, prev_action, h, c):
-        given_state = torch.Tensor(state)
-        # print(given_state,prev_action)
-        rnn_state = torch.cat((given_state, torch.tensor([prev_action])))
-        # print(given_state.size(),torch.tensor([prev_action]).size())
-        rnn_state = rnn_state.resize(1, 1, 3)
-        act_val, h_new, c_new = self.forward(rnn_state, h, c)
-        probs = Categorical(probs=act_val)
-        action = probs.sample().item()
-        # action = int(torch.argmax(act_val))
-        return action, h_new, c_new
-
-    def init_hidden_state(self, batch_size, training=None):
-
-        # assert training is not None, "training step parameter should be dtermined"
-
-        if training is True:
-            return torch.zeros([1, batch_size, self.hidden_space]), torch.zeros([1, batch_size, self.hidden_space])
-        else:
-            return torch.zeros([1, 1, self.hidden_space]), torch.zeros([1, 1, self.hidden_space])
-
-
-envs = VecPyTorch(DummyVecEnv([make_env("CartPole-v1", 1 + i, i) for i in range(1)]), device)
-
-
-student_model = StudentAgent(envs)
-student_model.load_state_dict(torch.load("runs/student_model_rnn_5000_1605_3.pth"))
+# student_model = StudentAgent(envs)
+# student_model.load_state_dict(torch.load('runs/student_model.pth'))
+# criterion = nn.CrossEntropyLoss()
+# optimizer = torch.optim.Adam(student_model.parameters(), lr=0.0001)
 teacher_model = Agent(envs).to(device)
-teacher_model.load_state_dict(torch.load("runs/teacher_model.pth"))
+teacher_model.load_state_dict(torch.load("runs/acrobot_teacher_model.pth"))
+
+
+def choose_action(given_state):
+    global steps_done
+    with torch.no_grad():
+        given_state = torch.Tensor(given_state)
+        # act_val = student_model(given_state)
+        # action = int(torch.argmax(act_val))
+        action, x, _ = teacher_model.get_action(given_state)
+        action = action.item()
+        return action
 
 
 ep = 10
@@ -137,24 +122,17 @@ loss_list = []
 for i in range(ep):
     step = 0
     st = env.reset()
-    st_h = st[::2]
     done = False
     reward = 0
     episode_loss = 0
-    action = envs.action_space.sample()
-    h, c = student_model.init_hidden_state(batch_size=128, training=False)
 
     while not done:
         env.render()
         step += 1
-        action_new, h, c = student_model.sample_action(st_h, action, h, c)
-        # action_new, hidden_1 = choose_action(st_h, action,hidden_1)
-        # action_new,_,_ = teacher_model.get_action(torch.tensor(st))
-        # action_new = action_new.item()
-        st_new, rew, done, info = env.step(action_new)
-        st = st_new
-        st_h = st_new[::2]
-        action = action_new
+        action = choose_action(st)
+        st, rew, done, info = env.step(action)
+        time.sleep(0.125)
+        reward += rew
         # print(reward)
         if done:
             loss_list.append(episode_loss)

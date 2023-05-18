@@ -21,7 +21,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp-name", type=str, default=os.path.basename(__file__).rstrip(".py"), help="the name of this experiment"
     )
-    parser.add_argument("--gym-id", type=str, default="CartPole-v1", help="the id of the gym environment")
+    parser.add_argument("--gym-id", type=str, default="Acrobot-v1", help="the id of the gym environment")
     parser.add_argument("--learning-rate", type=float, default=3e-4, help="the learning rate of the optimizer")
     parser.add_argument("--seed", type=int, default=1, help="seed of the experiment")
     parser.add_argument("--total-timesteps", type=int, default=300000, help="total timesteps of the experiments")
@@ -404,6 +404,6 @@ for update in range(1, num_updates + 1):
     writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
     if args.kle_stop or args.kle_rollback:
         writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
-PATH = "runs/teacher_model.pth"
+PATH = "runs/acrobot_teacher_model.pth"
 torch.save(agent.state_dict(), PATH)
 writer.close()

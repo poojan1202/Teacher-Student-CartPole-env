@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import random
 import matplotlib.pyplot as plt
 
+
 # vectorised env for teacher network
 # Same as teacher_cleanRL.py
 class VecPyTorch(VecEnvWrapper):
@@ -35,9 +36,6 @@ def make_env(gym_id, seed, idx):
     def thunk():
         env = gym.make(gym_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        # if args.capture_video:
-        #    if idx == 0:
-        #        env = Monitor(env, f'videos/{experiment_name}')
         env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
@@ -85,42 +83,31 @@ class Agent(nn.Module):
 class StudentAgent(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        self.inp = 2 + 1
-        self.hidden_space = 32
-        # self.layer1 = nn.Linear(np.array(inp).prod(),32)
-        self.layer1 = nn.Linear(self.inp, self.hidden_space)
-        self.layer2 = nn.LSTM(input_size=self.hidden_space, hidden_size=self.hidden_space, batch_first=True)
-        self.layer3 = nn.Linear(self.hidden_space, envs.action_space.n)
+        self.layer1 = nn.Linear(np.array(envs.observation_space.shape).prod(), 64)
+        self.layer2 = nn.Linear(64, 32)
+        self.layer3 = nn.Linear(32, envs.action_space.n)
 
-    def forward(self, x, h, c):
+    def forward(self, x):
         out = F.relu(self.layer1(x))
-        out, (h_out, c_out) = self.layer2(out, (h, c))
-        out = out.reshape(-1, 32)
+        out = F.relu(self.layer2(out))
         out = F.softmax(self.layer3(out))
-        return out, h_out, c_out
+        return out
 
-    def sample_action(self, state, prev_action, h, c):
+    # Sampling an action from the model
+    def sample_action(self, state):
         state = torch.Tensor(state)
-        # Concatenating partial_state and prev action to feed the rnn
-        rnn_state = torch.cat((state, torch.tensor([prev_action])))
-        rnn_state = rnn_state.resize(1, 1, 3)
-        act_val, h_new, c_new = self.forward(rnn_state, h, c)
+        act_val = self.forward(state)
         probs = Categorical(probs=act_val)
         action = probs.sample().item()
-        return action, h_new, c_new
-
-    def init_hidden_state(self, batch_size, training=None):
-        if training is True:
-            return torch.zeros([1, batch_size, self.hidden_space]), torch.zeros([1, batch_size, self.hidden_space])
-        else:
-            return torch.zeros([1, 1, self.hidden_space]), torch.zeros([1, 1, self.hidden_space])
+        action = int(torch.argmax(act_val))
+        return action
 
 
 # Replay Buffer
-class ReplayMemory:  # Stores [[state],[hidden_state],[prev_action],[h],[c]]
+class ReplayMemory:  # Stores [[state]]
     def __init__(self, size):
         self.size = size
-        self.memory = [[], [], [], [], []]
+        self.memory = [[]]
 
     def store(self, data):
         """Saves a transition."""
@@ -128,92 +115,53 @@ class ReplayMemory:  # Stores [[state],[hidden_state],[prev_action],[h],[c]]
             self.memory[idx].append(part)
 
     def pop(self):
-        """Deletes the least recent transition stored in the buffer"""
-        for idx in range(5):
+        for idx in range(1):
             self.memory[idx].pop(0)
 
     def remove(self):
-        """Deletes all the transitions stored in the buffer"""
-        for idx in range(5):
+        for idx in range(1):
             self.memory[idx].clear()
 
     def sample(self, batch_size):
-        """Create a random batch of BATCH_SIZE with sequence of 10 time-steps"""
-        #
-        rows = random.sample(range(10, len(self.memory[0])), batch_size)
-        experiences = [[], [], [], [], []]
+        rows = random.sample(range(0, len(self.memory[0])), batch_size)
+        experiences = [[]]
         for row in rows:
-            hold = [[], [], [], [], []]
-            start = row - 10
-            for vals in range(start, row):
-                for col in range(5):
-                    if col > 2:
-                        continue
-                    hold[col].append(self.memory[col][vals])
-
-            for col in range(5):
-                if col == 0:
-                    for i in range(10):
-                        experiences[col].append(self.memory[col][row + i - 10])
-                    continue
-                if col > 2:
-                    experiences[col].append(self.memory[col][row - 10])
-                    continue
-                experiences[col].append(hold[col])
+            for col in range(1):
+                experiences[col].append(self.memory[col][row])
         return experiences
 
     def __len__(self):
-        return len(self.memory[1])
+        return len(self.memory[0])
 
 
 def optimize_model(memory, BATCH_SIZE, student_model, teacher_model, criterion, optimizer):
-
-    if len(memory) < BATCH_SIZE + 10:
+    if len(memory) < BATCH_SIZE:
         return 0
-    # Getting samples
     experiences = memory.sample(BATCH_SIZE)
-    # Fully Observable states for Teacher Network
     states = torch.tensor(experiences[0])
-    # Partial Observable states for Student Network
-    partial_states = torch.tensor(experiences[1])
-    # Batch of previous actions from the samples
-    prev_action = torch.tensor([experiences[2]])
-    prev_action = prev_action.resize(128, 10, 1)
-    # Concatenating actions and partial states to feed the student network
-    rnn_state = torch.cat((partial_states, prev_action), 2)
-
-    # hidden_memory for the batch of sequence
-    h_net = torch.stack(experiences[3])
-    h_net = h_net.resize(1, 128, 32)
-    # hidden_memory for the batch of sequence
-    c_net = torch.stack(experiences[4])
-    c_net = c_net.resize(1, 128, 32)
-
-    student_action_batch, _, _ = student_model(rnn_state, h_net, c_net)
+    student_action_batch = student_model(states)
     student_action_batch = torch.Tensor(student_action_batch)
+    student_action_batch = student_action_batch.resize(2, 128)
 
     with torch.no_grad():
         teacher_action_batch, x, y = teacher_model.get_action(states)
 
-    # getting actions from teacher network by giving fully obs states
-    teacher_act_vec = torch.zeros((BATCH_SIZE * 10, 2))
+    teacher_act_vec = torch.zeros((2, BATCH_SIZE))
 
-    for i in range(BATCH_SIZE * 10):
-        # actions in one-hot vector arrays
-        teacher_act_vec[i][teacher_action_batch[i].item()] = 1
+    for i in range(BATCH_SIZE):
+        teacher_act_vec[teacher_action_batch[i].item()][i] = 1
 
     loss = criterion(student_action_batch, teacher_act_vec)
     optimizer.zero_grad()
-    loss.backward(retain_graph=True)
+    loss.backward()
     optimizer.step()
-    return float(loss)
+    return loss
 
 
 if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = gym.make("CartPole-v1")
-
     envs_vector = VecPyTorch(DummyVecEnv([make_env("CartPole-v1", 1 + i, i) for i in range(1)]), device)
 
     teacher_model = Agent(envs_vector).to(device)
@@ -227,13 +175,7 @@ if __name__ == "__main__":
     BATCH_SIZE = 128
 
     # Initialize buffer with 50 eps of teacher network
-    b_ep = 50
-
-    # Training loop vars
-    ep = 1000
-    loss_list = []
-    step_loss = []
-    reward_list = []
+    b_ep = 100
 
     for i in range(b_ep):
         st = env.reset()
@@ -243,65 +185,48 @@ if __name__ == "__main__":
         episode_loss = 0
         action = envs_vector.action_space.sample()
         step = 0
-        h, c = student_model.init_hidden_state(batch_size=BATCH_SIZE, training=False)
 
         while not done:
             step += 1
-            action_new, h_n, c_n = student_model.sample_action(partial_st, action, h, c)
             teacher_action = teacher_model.get_action(torch.tensor(st))
-            st_new, rew, done, info = env.step(teacher_action[0].item())
-
-            memory.store([st, partial_st, action, h_n.detach(), c_n.detach()])
-            st = st_new
-            partial_st = st_new[::2]
-            action = action_new
-            h = h_n
-            c = c_n
-
+            action = student_model.sample_action(st)
+            memory.store([st])
+            st, rew, done, info = env.step(teacher_action[0].item())
             if done:
                 print("ep: ", i)
                 print("steps: ", step)
 
-    # Training Loop
+    ep = 5000
+    loss_list = []
+    step_loss = []
+    reward_list = []
     for i in range(ep):
         step = 0
         st = env.reset()
-        partial_st = st[::2]
         done = False
         reward = 0
         episode_loss = 0
-        action = envs_vector.action_space.sample()
-        h, c = student_model.init_hidden_state(batch_size=BATCH_SIZE, training=False)
 
-        # Saving Network after every 50 epds
-        if (i + 1) % 50 == 0:
-            PATH = f"runs/1605_3/student_model_rnn_5000_1605_3_{i + 1}.pth"
-            torch.save(student_model.state_dict(), PATH)
-        # Emptying Memory (Replay Buffer) after every 200eps
-        if i > 200 and (i + 1) % 200 == 0:
-            memory.remove()
-        # Training Network every step instead of at the end of every episode
         while not done:
             step += 1
-            action_new, h, c = student_model.sample_action(partial_st, action, h, c)
+            action = student_model.sample_action(st)
+            memory.store([st])
+            if i > 1000 and (i + 1) % 1000 == 0:
+                memory.remove()
+            st, rew, done, info = env.step(action)
 
-            st_new, rew, done, info = env.step(action_new)
-
-            memory.store([st, partial_st, action, h.detach(), c.detach()])
-            st = st_new
-            partial_st = st_new[::2]
-            action = action_new
-            loss = optimize_model(
-                memory=memory,
-                BATCH_SIZE=BATCH_SIZE,
-                student_model=student_model,
-                teacher_model=teacher_model,
-                criterion=criterion,
-                optimizer=optimizer,
+            loss = float(
+                optimize_model(
+                    memory=memory,
+                    BATCH_SIZE=BATCH_SIZE,
+                    student_model=student_model,
+                    teacher_model=teacher_model,
+                    criterion=criterion,
+                    optimizer=optimizer,
+                )
             )
             if loss > 0:
                 step_loss.append(loss)
-
             episode_loss += loss
             if len(memory) > 50000:
                 memory.pop()
@@ -313,8 +238,7 @@ if __name__ == "__main__":
                 print("steps: ", step)
                 print("episode_loss: ", episode_loss)
 
-    # Saving model and displaying training plots
-    PATH = "runs/student_model_rnn_5000_1605_3.pth"
+    PATH = "runs/student_model_sample.pth"
     torch.save(student_model.state_dict(), PATH)
     x1 = np.arange(len(loss_list))
     fig1, ax1 = plt.subplots()

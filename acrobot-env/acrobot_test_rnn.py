@@ -5,10 +5,11 @@ import torch.nn as nn
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnvWrapper
 from torch.distributions.categorical import Categorical
 import torch.nn.functional as F
+import time
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-env = gym.make("CartPole-v1")
+env = gym.make("Acrobot-v1")
 
 # vectorised env for teacher network
 # Same as teacher_cleanRL.py
@@ -87,7 +88,7 @@ class Agent(nn.Module):
 class StudentAgent(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        self.inp = 3
+        self.inp = 4 + 1
         self.hidden_space = 32
         # self.layer1 = nn.Linear(np.array(inp).prod(),32)
         self.layer1 = nn.Linear(self.inp, self.hidden_space)
@@ -106,7 +107,7 @@ class StudentAgent(nn.Module):
         # print(given_state,prev_action)
         rnn_state = torch.cat((given_state, torch.tensor([prev_action])))
         # print(given_state.size(),torch.tensor([prev_action]).size())
-        rnn_state = rnn_state.resize(1, 1, 3)
+        rnn_state = rnn_state.resize(1, 1, 5)
         act_val, h_new, c_new = self.forward(rnn_state, h, c)
         probs = Categorical(probs=act_val)
         action = probs.sample().item()
@@ -123,13 +124,13 @@ class StudentAgent(nn.Module):
             return torch.zeros([1, 1, self.hidden_space]), torch.zeros([1, 1, self.hidden_space])
 
 
-envs = VecPyTorch(DummyVecEnv([make_env("CartPole-v1", 1 + i, i) for i in range(1)]), device)
+envs = VecPyTorch(DummyVecEnv([make_env("Acrobot-v1", 1 + i, i) for i in range(1)]), device)
 
 
 student_model = StudentAgent(envs)
-student_model.load_state_dict(torch.load("runs/student_model_rnn_5000_1605_3.pth"))
+student_model.load_state_dict(torch.load("runs/student_model_rnn_acrobot.pth"))
 teacher_model = Agent(envs).to(device)
-teacher_model.load_state_dict(torch.load("runs/teacher_model.pth"))
+teacher_model.load_state_dict(torch.load("runs/acrobot_teacher_model.pth"))
 
 
 ep = 10
@@ -137,7 +138,7 @@ loss_list = []
 for i in range(ep):
     step = 0
     st = env.reset()
-    st_h = st[::2]
+    st_h = st[:4]
     done = False
     reward = 0
     episode_loss = 0
@@ -152,8 +153,9 @@ for i in range(ep):
         # action_new,_,_ = teacher_model.get_action(torch.tensor(st))
         # action_new = action_new.item()
         st_new, rew, done, info = env.step(action_new)
+        time.sleep(0.125)
         st = st_new
-        st_h = st_new[::2]
+        st_h = st_new[:4]
         action = action_new
         # print(reward)
         if done:
